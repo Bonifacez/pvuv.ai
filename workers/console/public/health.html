@@ -1,4 +1,10 @@
 <!doctype html>
+<!--
+ * [INPUT]: 依赖 /api/me 的 ingest_host，依赖 /api/diagnostics 与 ingest 的 /in、/v
+ * [OUTPUT]: 对外提供部署自检页 /health
+ * [POS]: console/public 的自检页，与 site.html、sites.html 共用 INGEST_HOST
+ * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
+-->
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -41,7 +47,7 @@
 
   <div class="step">
     <h2>2 · Ingest endpoint</h2>
-    <p class="hint">Where your <code>f.js</code> sends events. Default is <code>in.&lt;your-domain&gt;</code> — change it if your ingest host differs.</p>
+    <p class="hint">Where your <code>f.js</code> sends events. Defaults to this deployment's ingest host — change it only if you are probing a different one.</p>
     <label class="small">Ingest base URL</label>
     <input id="ingestUrl" placeholder="https://in.example.com">
     <div id="ingest" style="margin-top:10px"></div>
@@ -80,11 +86,26 @@ function rowHtml(status, label, detail, fix) {
 function setRows(el, rows) { $(el).innerHTML = rows.join('') || '<div class="row"><span class="detail">—</span></div>'; }
 
 async function guard(r) { if (r.status === 401) { location.href = '/login.html'; throw new Error('auth'); } return r; }
-// production: in.<apex>; local wrangler dev has no subdomains — point at the
-// ingest worker's default dev port instead of a nonsensical "in.127.0.0.1"
-const defaultIngest = () => /^(localhost|127\.0\.0\.1|\[::1\]|\d+\.\d+\.\d+\.\d+)$/.test(location.hostname)
-  ? `http://${location.hostname}:8787`
-  : `https://in.${location.hostname.replace(/^(www|console)\./, '')}`;
+// INGEST_HOST from /api/me — same source as the embed snippet. The in.<apex>
+// guess is only for deploys that predate that var. Local wrangler has no
+// subdomains, so it points at the ingest worker's dev port.
+function guessedIngest() {
+  return /^(localhost|127\.0\.0\.1|\[::1\]|\d+\.\d+\.\d+\.\d+)$/.test(location.hostname)
+    ? `http://${location.hostname}:8787`
+    : `https://in.${location.hostname.replace(/^(www|console)\./, '')}`;
+}
+function hostToUrl(host) {
+  const h = String(host || '').trim().replace(/^https?:\/\//, '').replace(/\/+$/, '');
+  return h ? `https://${h}` : '';
+}
+const ingestReady = fetch('/api/me').then(async (r) => {
+  if (r.status === 401) { location.href = '/login.html'; throw new Error('auth'); }
+  let host = '';
+  try { host = (await r.json()).ingest_host; } catch { /* keep the guess */ }
+  const url = hostToUrl(host) || guessedIngest();
+  if (!$('ingestUrl').value.trim()) $('ingestUrl').value = url;
+  return url;
+});
 
 async function run() {
   worst = 'ok';
@@ -100,7 +121,12 @@ async function run() {
   setRows('env', checks.map((c) => { worst = worse(worst, c.status); return rowHtml(c.status, c.label, c.detail, c.fix); }));
 
   // step 2 — ingest reachability + ensure self-test site
-  const ingest = ($('ingestUrl').value || defaultIngest()).replace(/\/+$/, '');
+  let ingest = $('ingestUrl').value.trim();
+  if (!ingest) {
+    try { ingest = await ingestReady; }
+    catch (e) { if (e && e.message === 'auth') { $('run').disabled = false; return; } }
+  }
+  ingest = (ingest || guessedIngest()).replace(/\/+$/, '');
   $('ingestUrl').value = ingest;
   let selftest;
   try {
@@ -178,10 +204,7 @@ async function run() {
   $('run').disabled = false;
 }
 
-$('ingestUrl').value = defaultIngest();
 $('run').addEventListener('click', run);
-// make sure we're logged in before showing anything actionable
-fetch('/api/me').then((r) => { if (r.status === 401) location.href = '/login.html'; });
 </script>
 </body>
 </html>
